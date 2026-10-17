@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+# dev-env artifact only: consumers install this library with `pip install git+...@<tag>`,
+# so a lock file here pins nobody's build.
+uv.lock
+
+# Caches / artifacts
+.pytest_cache/
+.ruff_cache/
+*.npy
+cache/
+runs/
+data/
+.env
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Local research scripts and notes (kept locally, not published)
+examples/
+docs/prevalence-qc-roadmap.md
