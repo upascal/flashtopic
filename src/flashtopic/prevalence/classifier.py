@@ -32,7 +32,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Protocol, Sequence, runtime_checkable
 
-from flashtopic.llm import _backoff, _config, _get_semaphore, configure_concurrency
+from flashtopic.llm import (
+    _backoff, _config, _get_semaphore, billed_cost_usd, configure_concurrency, record_usage,
+)
 
 QUESTION_KINDS = ("noul", "choice", "score")
 _DEFAULT_CACHE_DIR = Path.cwd() / ".flashtopic_cache" / "classifier"
@@ -319,11 +321,15 @@ class JevClassifier:
             try:
                 async with sem:
                     resp = await self.transport(payload)
+                u = resp.get("usage") or {}
+                record_usage(self.name, u.get("input_tokens", 0), u.get("output_tokens", 0),
+                             billed_cost_usd(u) or 0.0)
                 return parse_answers(questions, resp)
             except Exception as e:  # network / HTTP / JSON — retry with backoff
                 last = e
                 if attempt < self.max_attempts - 1:
                     await asyncio.sleep(_backoff(attempt))
+        record_usage(self.name, ok=False)
         return [Answer(q.qid, error=f"call failed: {str(last)[:200]}") for q in questions]
 
     async def classify(self, doc_text: str, questions: Sequence[Question]) -> list[Answer]:

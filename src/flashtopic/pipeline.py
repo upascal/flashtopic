@@ -93,7 +93,6 @@ def _cluster_evidence(
     (``len(set(ui.doc_idxs[uid]))``), and a term must clear ``min_df`` distinct documents
     to be eligible — so one verbose document can't dominate a cluster's label.
     """
-    rng = np.random.default_rng(seed)
     # Distinct-document weight per unique sentence (dedup repeated doc ids).
     doc_w = [len(set(d)) for d in ui.doc_idxs]
     terms_by_c: dict[int, list[str]] = {}
@@ -102,6 +101,10 @@ def _cluster_evidence(
     coherence_by_c: dict[int, dict[str, float]] = {}
     members_by_c: dict[int, np.ndarray] = {}
     for c in sorted(set(labels.tolist())):
+        # One generator per cluster, seeded from (seed, c). A single generator shared
+        # across the loop made each cluster's sibling sample depend on how many draws
+        # the clusters before it consumed, i.e. on their order and sizes.
+        rng = np.random.default_rng(None if seed is None else [int(seed), int(c)])
         members = np.where(labels == c)[0]
         members_by_c[c] = members
         member_uids = members

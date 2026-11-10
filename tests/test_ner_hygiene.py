@@ -93,6 +93,35 @@ def test_mid_name_initial_not_split():
     assert units == ["He told J. Robert Oppenheimer the news."]
 
 
+def test_doubled_bullet_marker_does_not_leak():
+    # _LINE_BULLET rewrites "- " to a marker; _INLINE_BULLET then matches " * " and
+    # eats the marker's trailing newline, which used to strand "<<<LIST_BREAK>>>"
+    # inside the returned unit as a seventh "word".
+    units = split_list_units("- * Double marker alpha beta gamma delta.\n")
+    assert units == ["Double marker alpha beta gamma delta."]
+
+
+def test_bullet_then_enumerator_marker_does_not_leak():
+    units = split_list_units("A line here.\n- 1. Numbered item alpha beta gamma.\n")
+    assert units == ["A line here.", "1. Numbered item alpha beta gamma."]
+
+
+def test_no_unit_ever_contains_the_marker():
+    from flashtopic.chunking import _LIST_BREAK_MARKER
+
+    shapes = [
+        "- * Double marker alpha beta gamma delta.",
+        "Intro.\n- 1. Numbered item alpha beta gamma.",
+        "- - Twice dashed item here.",
+        "* 1) Starred then enumerated item.",
+        "Lead. - A. Lettered after a dash item.",
+    ]
+    for shape in shapes:
+        for unit in split_list_units(shape):
+            assert _LIST_BREAK_MARKER not in unit, (shape, unit)
+            assert unit == unit.strip()
+
+
 # --- feed hygiene: lettered leading markers -----------------------------------
 
 def test_lettered_lead_marker_stripped():

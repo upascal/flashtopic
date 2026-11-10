@@ -28,3 +28,4 @@ data/
 # Local research scripts and notes (kept locally, not published)
 examples/
 docs/prevalence-qc-roadmap.md
+scripts/platform_drift.py

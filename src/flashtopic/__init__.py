@@ -9,7 +9,7 @@ every stage takes.
 
 from __future__ import annotations
 
-__version__ = "0.2.0"
+__version__ = "0.6.0"
 
 from flashtopic.config import Workspace
 from flashtopic.schema import Doc

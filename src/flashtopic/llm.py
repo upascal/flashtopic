@@ -18,11 +18,12 @@ from dataclasses import dataclass
 from typing import Any
 
 import openai
-from dotenv import load_dotenv
+from dotenv import find_dotenv, load_dotenv
 from openai import AsyncOpenAI
 from pydantic import BaseModel, ValidationError
 
-load_dotenv()  # searches cwd upward; harmless if absent
+# usecwd: the caller's project .env, not one beside this file (the default search starts here).
+load_dotenv(find_dotenv(usecwd=True))  # harmless if absent
 
 _DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 _config = {
@@ -94,6 +95,54 @@ def estimate_cost_usd(model: str, input_tokens: int, output_tokens: int) -> floa
     return input_tokens / 1_000_000 * in_price + output_tokens / 1_000_000 * out_price
 
 
+def billed_cost_usd(usage: dict | None) -> float | None:
+    """What OpenRouter charged for one call, from a response's ``usage`` block.
+
+    BYOK keys report ``cost`` 0 and the provider's charge as ``upstream_inference_cost``.
+    None when the response carries no cost, so callers can fall back to the estimate.
+    """
+    if not usage:
+        return None
+    upstream = (usage.get("cost_details") or {}).get("upstream_inference_cost")
+    cost = usage.get("cost")
+    if usage.get("is_byok") or not cost:
+        cost = upstream if upstream is not None else cost
+    return float(cost) if cost is not None else None
+
+
+@dataclass
+class Usage:
+    """Running totals of real API calls (cache hits never reach here), per model."""
+    calls: int = 0
+    failed: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cost_usd: float = 0.0
+
+
+USAGE: dict[str, Usage] = {}
+
+
+def record_usage(model: str, input_tokens: int = 0, output_tokens: int = 0,
+                 cost_usd: float = 0.0, *, ok: bool = True) -> None:
+    u = USAGE.setdefault(model, Usage())
+    u.calls += 1
+    u.failed += 0 if ok else 1
+    u.input_tokens += input_tokens
+    u.output_tokens += output_tokens
+    u.cost_usd += cost_usd
+
+
+def usage_snapshot() -> dict[str, Usage]:
+    return {m: Usage(**vars(u)) for m, u in USAGE.items()}
+
+
+def _response_cost(model: str, resp: Any, in_tok: int, out_tok: int) -> float:
+    usage = getattr(resp, "usage", None)
+    billed = billed_cost_usd(getattr(usage, "model_extra", None) or None) if usage else None
+    return billed if billed is not None else estimate_cost_usd(model, in_tok, out_tok)
+
+
 @dataclass
 class LLMResult:
     text: str
@@ -134,13 +183,14 @@ async def call_llm_text(
             usage = getattr(resp, "usage", None)
             in_tok = getattr(usage, "prompt_tokens", 0) if usage else 0
             out_tok = getattr(usage, "completion_tokens", 0) if usage else 0
+            cost = _response_cost(model, resp, in_tok, out_tok)
+            record_usage(model, in_tok, out_tok, cost, ok=bool(text))
             if not text:
                 if attempt < max_attempts - 1:
                     await asyncio.sleep(_backoff(attempt))
                     continue
-                return LLMResult("", model, in_tok, out_tok,
-                                 estimate_cost_usd(model, in_tok, out_tok), "empty_response")
-            return LLMResult(text, model, in_tok, out_tok, estimate_cost_usd(model, in_tok, out_tok))
+                return LLMResult("", model, in_tok, out_tok, cost, "empty_response")
+            return LLMResult(text, model, in_tok, out_tok, cost)
         except (openai.RateLimitError, openai.APIConnectionError, openai.APITimeoutError) as e:
             last_err = e
             if attempt < max_attempts - 1:
@@ -149,6 +199,7 @@ async def call_llm_text(
         except openai.APIError as e:
             last_err = e
             break
+    record_usage(model, ok=False)
     return LLMResult("", model, 0, 0, 0.0,
                      f"llm_call_failed: {str(last_err)[:200]}" if last_err else "unknown")
 
@@ -189,7 +240,9 @@ async def call_llm_structured(
             usage = getattr(resp, "usage", None)
             in_tok = getattr(usage, "prompt_tokens", 0) if usage else 0
             out_tok = getattr(usage, "completion_tokens", 0) if usage else 0
-            raw = LLMResult(text, model, in_tok, out_tok, estimate_cost_usd(model, in_tok, out_tok))
+            cost = _response_cost(model, resp, in_tok, out_tok)
+            record_usage(model, in_tok, out_tok, cost, ok=bool(text))
+            raw = LLMResult(text, model, in_tok, out_tok, cost)
             if not text:
                 if attempt < max_attempts - 1:
                     await asyncio.sleep(_backoff(attempt))
@@ -213,6 +266,7 @@ async def call_llm_structured(
         except openai.APIError as e:
             last_err = e
             break
+    record_usage(model, ok=False)
     return None, LLMResult("", model, 0, 0, 0.0,
                            f"llm_call_failed: {str(last_err)[:200]}" if last_err else "unknown")
 

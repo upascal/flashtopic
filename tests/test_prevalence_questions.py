@@ -85,3 +85,55 @@ def test_hash_is_order_independent_and_content_sensitive():
     assert h1 == h2 == question_set_hash(build_question_set(ts).questions)
     ts[0].label = "a (revised)"
     assert build_question_set(ts).hash != h1
+
+
+def _drafted(t):
+    from flashtopic.prevalence.codebook import Codebook
+    return Codebook(
+        topic_id=t.topic_id, label=t.label, definition="Argues strike votes decide the outcome.",
+        positive_examples=["The vote settled it."],
+        include=["Says the vote decided the strike", "Explains why members voted"],
+        exclude=["Fare changes, unless tied to the vote",
+                 "The topic appears only as a bare item in a list, or as a single passing phrase."],
+        negative_examples=["Fares rose in March."],
+    )
+
+
+def test_drafted_rules_and_near_misses_reach_the_presence_question():
+    t = _topic(1, "strike votes")
+    cb = _drafted(t)
+    p = presence_question(t, cb)
+    assert "Says the vote decided the strike" in p.criteria
+    assert "Fare changes, unless tied to the vote" in p.criteria_false
+    assert "Fares rose in March." in p.criteria_false and "passing" in p.criteria_false
+    assert p.text == "Does the document discuss strike votes?"  # criteria placement: plain wording
+
+
+def test_template_codebook_questions_are_unchanged_by_the_drafted_sections():
+    # No include/exclude/negatives → the same text as before, so cached answers still hit.
+    t = _topic(1, "strike votes")
+    p = presence_question(t, build_codebook(t))
+    assert "It counts when" not in p.criteria and p.criteria_false.count("\n") == 0
+
+
+def test_codebook_placement_moves_the_codebook_into_the_instructions():
+    t = _topic(1, "strike votes")
+    cb = _drafted(t)
+    ins = presence_question(t, cb, codebook_in="instructions")
+    both = presence_question(t, cb, codebook_in="both")
+    assert "Fare changes" in ins.text and "Fare changes" not in ins.criteria_false
+    assert "Fare changes" in both.text and "Fare changes" in both.criteria_false
+    assert len({presence_question(t, cb).content_hash, ins.content_hash, both.content_hash}) == 3
+    assert "Fare changes" in depth_question(t, cb, codebook_in="instructions").criteria
+    with pytest.raises(ValueError):
+        presence_question(t, cb, codebook_in="everywhere")
+
+
+def test_rule_and_nearmiss_checks_come_from_the_codebook_without_the_passing_rule():
+    t = _topic(1, "strike votes")
+    qs = build_question_set([t], codebooks={"T1": _drafted(t)})
+    assert qs.by_topic["T1"] == ["T1.presence", "T1.depth", "T1.rule1", "T1.rule2", "T1.nearmiss1"]
+    assert [role_of(q) for q in qs.by_topic["T1"][2:]] == ["rule", "rule", "nearmiss"]
+    assert "Fare changes" in qs.question("T1.nearmiss1").text
+    assert build_question_set([t], codebooks={"T1": _drafted(t)}, include_rules=False).by_topic["T1"] == [
+        "T1.presence", "T1.depth"]

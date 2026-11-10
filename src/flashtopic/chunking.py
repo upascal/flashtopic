@@ -133,17 +133,26 @@ _INLINE_ENUM = re.compile(r"\s+(?=\d{1,2}[\.\)]\s+[\*_\"']*[A-Z])")
 # Oppenheimer") never splits. Without this, spaCy keeps "… World War II. B." as one
 # sentence and NER spans leak across the item boundary.
 _INLINE_ENUM_ALPHA = re.compile(r"(?<=[.!?:;])\s+(?=[A-Za-z][\.\)]\s+[\*_\"']*[A-Z])")
-_LIST_BREAK = "\n<<<LIST_BREAK>>>\n"
+_LIST_BREAK_MARKER = "<<<LIST_BREAK>>>"
+_LIST_BREAK = f"\n{_LIST_BREAK_MARKER}\n"
 
 
 def split_list_units(body_text: str) -> list[str]:
-    """Split text at markdown/list boundaries before sentence splitting."""
+    """Split text at markdown/list boundaries before sentence splitting.
+
+    The four patterns run in sequence, each over the previous one's output, so a
+    later pattern can match across a marker an earlier one inserted and consume one
+    of its newlines ("- * Double", "- 1. Numbered"). Splitting on the bare marker
+    rather than on ``_LIST_BREAK`` means such a stranded marker still splits (or
+    vanishes, when it sits beside another) instead of surviving as literal text in a
+    unit, where it used to count as a word.
+    """
     text = body_text.replace("\r\n", "\n").replace("\r", "\n")
     text = _LINE_BULLET.sub(_LIST_BREAK, text)
     text = _INLINE_BULLET.sub(_LIST_BREAK, text)
     text = _INLINE_ENUM.sub(_LIST_BREAK, text)
     text = _INLINE_ENUM_ALPHA.sub(_LIST_BREAK, text)
-    return [p.strip() for p in text.split(_LIST_BREAK) if p.strip()]
+    return [p.strip() for p in text.split(_LIST_BREAK_MARKER) if p.strip()]
 
 
 def chunk_paragraph(

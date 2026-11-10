@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "flashtopic"
-version = "0.5.0"
+version = "0.6.0"
 description = "Fast GPU topic modeling + debiased prevalence scoring for large text corpora"
 readme = "README.md"
 requires-python = ">=3.11"

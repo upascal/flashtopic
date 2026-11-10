@@ -38,11 +38,26 @@ import numpy as np
 from pydantic import BaseModel, Field
 
 from flashtopic.llm import call_llm_structured, configure_concurrency
-from flashtopic.prevalence.codebook import Codebook
+from flashtopic.prevalence.codebook import Codebook, Component
 from flashtopic.prevalence.topics import Topic
 
-DRAFT_PROMPT_VERSION = "codebook_draft_v1"
+DRAFT_PROMPT_VERSION = "codebook_draft_v2"  # v2: lists marked as examples
 DEFAULT_DRAFT_MODEL = "anthropic/claude-sonnet-5.5"
+# How a judge reads a codebook, learned the hard way: it treats any unmarked list as the
+# complete specification, reads "met when X" as "only when X", and cannot use names that
+# point outside the prompt. Shared by the drafter and the decomposer.
+WRITING_RULES = (
+    "Writing rules (the judge is an LLM that reads every word literally):\n"
+    "- Mark every list of instances as examples: 'such as', 'for example', 'e.g.'. An "
+    "unmarked list (\"floods, droughts, wildfires\") is read as the complete set, and "
+    "anything else is then judged not to count.\n"
+    "- Write a rule at the level of the idea, not its most common instances. If the rule is "
+    "about any natural disaster, say so and give instances as examples; do not let a rule "
+    "about hurricanes stand in for all disasters.\n"
+    "- Anticipate boundaries from the topic itself (what a neighbouring idea would say, what "
+    "a weaker version of the claim looks like), not from particular documents you imagine.\n"
+    "- Names must explain themselves: never refer to rule numbers or ids the judge won't see."
+)
 DEFAULT_PASSING_RULE = (
     "The topic appears only as a bare item in a list, or as a single passing phrase, "
     "with no elaboration of what should be done or why."
@@ -177,7 +192,8 @@ def _system_prompt(corpus_topic: str, passing_rule: str) -> str:
         f"mention rule in exclude: \"{passing_rule}\"\n"
         "- Choose examples only by id from the sentences shown. Positive: clear instances. "
         "Negative: similar-looking sentences that do not count.\n"
-        "- If the idea likely appears in most documents of this corpus, set breadth_warning."
+        "- If the idea likely appears in most documents of this corpus, set breadth_warning.\n\n"
+        + WRITING_RULES
     )
 
 
@@ -313,3 +329,103 @@ def topic_for_codebook(parent: Topic, cb: Codebook) -> Topic:
     members — prevalence is measured against the codebook; membership only guides
     sampling, and the estimator stays unbiased whatever it is."""
     return replace(parent, topic_id=cb.topic_id, label=cb.label)
+
+
+# --------------------------------------------------------------------------- #
+# Decomposition: flat include/exclude rules → conditions, relations and a formula
+# --------------------------------------------------------------------------- #
+DECOMPOSE_PROMPT_VERSION = "codebook_decompose_v2"  # v2: writing rules
+
+
+class DraftedComponent(BaseModel):
+    id: str = Field(description="Short id used in formulas: a letter plus optional digits (W, F, B1).")
+    condition: str = Field(description="ONE checkable claim about the document. No 'and'/'or' "
+                                       "joining two ideas, no 'without …' clauses.")
+    kind: Literal["atom", "relation"] = Field(
+        description="relation: how other conditions connect (means, cause, same claim, who holds "
+        "the view). atom: anything else.")
+    links: list[str] = Field(default_factory=list, description="relation only: the ids it connects.")
+    yes_when: list[str] = Field(default_factory=list, description=(
+        "Cases that ALSO meet it, beyond its plain reading (shown as 'Also met when'). "
+        "Never restate the condition."))
+    no_when: list[str] = Field(default_factory=list, description=(
+        "Cases that look like it but do NOT meet it (shown as 'Not met when')."))
+
+
+class NamedFormula(BaseModel):
+    name: str = Field(description="A self-explanatory name, e.g. 'balance without the link'. "
+                                  "No references to rule numbers.")
+    formula: str = Field(description="Boolean formula over ids saying which piece is missing.")
+
+
+class DecomposedCodebook(BaseModel):
+    components: list[DraftedComponent]
+    formula: str = Field(description="Membership rule over ids: & (and), | (or), ~ (not), parentheses.")
+    near_misses: list[NamedFormula] = Field(
+        description="Each exclude rule rewritten as which required piece is missing.")
+    open_questions: list[str] = Field(
+        default_factory=list,
+        description="Boundary decisions the flat codebook never made (e.g. does an implied outcome "
+        "count?). The human decides these; do not guess.")
+
+
+_DECOMPOSE_SYS = (
+    "You restructure a topic codebook. Its include/exclude rules bundle several ideas into "
+    "each sentence. Break every rule into single conditions a reader can check one at a time, "
+    "then say how they combine.\n\n"
+    "- One claim per condition. 'Mentions costs, such as price rises or job losses, or "
+    "admits the plan was delayed' is three conditions, not one.\n"
+    "- What makes the topic distinctive is usually how conditions connect, not whether each "
+    "appears: make that connection its own relation condition (e.g. 'the policy is "
+    "presented as the cause of the outcome'), linking the conditions it joins.\n"
+    "- Add a condition for who holds the view when it matters (the author proposes it vs. "
+    "reports others' view), and one for elaboration vs. passing mention.\n"
+    "- formula: the rule that decides membership, as a boolean expression over ids.\n"
+    "- Rewrite each exclude rule as a near miss: a formula naming the piece that is missing "
+    "(e.g. '(B1 | B2) & ~R'). Exclusion conditions are usually signals of a near miss, not "
+    "independent vetoes.\n"
+    "- List boundary decisions the codebook never made in open_questions.\n\n"
+    + WRITING_RULES
+)
+
+
+def _decompose_user(cb: Codebook) -> str:
+    lines = [f"TOPIC: {cb.label}", f"DEFINITION: {cb.definition}", "INCLUDE rules:"]
+    lines += [f"- {r}" for r in cb.include]
+    lines.append("EXCLUDE rules:")
+    lines += [f"- {r}" for r in cb.exclude]
+    if cb.positive_examples:
+        lines.append("Positive example sentences:")
+        lines += [f"- {e}" for e in cb.positive_examples]
+    if cb.negative_examples:
+        lines.append("Near-miss example sentences:")
+        lines += [f"- {e}" for e in cb.negative_examples]
+    return "\n".join(lines)
+
+
+@dataclass
+class DecomposeResult:
+    codebook: Codebook | None  # the flat codebook plus components / formula / near misses
+    open_questions: list[str]
+    cost_usd: float = 0.0
+    error: str | None = None
+
+
+def to_structured(cb: Codebook, d: DecomposedCodebook) -> Codebook:
+    """Attach a decomposition to (a copy of) ``cb``; raises on a malformed formula."""
+    return replace(cb, frozen=None,
+                   components=[Component(**c.model_dump()) for c in d.components],
+                   formula=d.formula, near_misses={n.name: n.formula for n in d.near_misses})
+
+
+async def decompose_codebook(cb: Codebook, *, model: str = DEFAULT_DRAFT_MODEL) -> DecomposeResult:
+    """Draft a structured version of a flat codebook. Review it like any draft."""
+    parsed, raw = await call_llm_structured(_DECOMPOSE_SYS, _decompose_user(cb), model,
+                                            DecomposedCodebook, temperature=0.2, max_tokens=4000)
+    if parsed is None:
+        return DecomposeResult(None, [], raw.cost_usd, raw.error or "no decomposition")
+    try:
+        out = to_structured(cb, parsed)
+    except ValueError as e:
+        return DecomposeResult(None, parsed.open_questions, raw.cost_usd, str(e))
+    return DecomposeResult(out, parsed.open_questions, raw.cost_usd)

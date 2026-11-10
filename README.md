@@ -34,6 +34,10 @@ pip install "flashtopic[trf] @ git+https://github.com/upascal/flashtopic"    # o
 python -m spacy download en_core_web_trf  # optional: higher-accuracy NER / lemmas
 ```
 
+To pin a release, which a project depending on flashtopic should do, add the tag:
+`flashtopic @ git+https://github.com/upascal/flashtopic@v0.6.0`. If you only need the LLM
+gateway or the prevalence estimators, the core install without an extra is enough.
+
 Set `Workspace(spacy_model="en_core_web_trf")` to run the NER + distinctiveness stages
 on the transformer model; sentence segmentation stays on `en_core_web_sm`.
 
